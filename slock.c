@@ -87,6 +87,41 @@ readpw(Display *dpy, const char *pws)
 	KeySym ksym;
 	XEvent ev;
 
+	XIM im;
+	XIMStyles *im_styles;
+	XIMStyle im_style = 0;
+	char *imvalret;
+	XIC ic;
+	Status status;
+
+
+	im = XOpenIM(dpy, NULL, NULL, NULL);
+	if (im == NULL)
+		die("slock: XOpenIM failed");
+
+	if(im) {
+		imvalret = XGetIMValues(im, XNQueryInputStyle, &im_styles, NULL);
+		if (imvalret != NULL || im_styles == NULL) {
+			die("slock: input method doesn't support any styles");
+		}
+
+		if (im_styles) {
+			im_style = 0;
+			/* for now just pick the first style if it exists */
+			if (im_styles->count_styles)
+				im_style = im_styles->supported_styles[0];
+		}
+
+		if (im_style == 0) {
+			die("slock: input method doesn't support the styles we support");
+		}
+		XFree(im_styles);
+	}
+
+	if (im && im_style) {
+		ic = XCreateIC(im, XNInputStyle, im_style, NULL);
+	}
+
 	len = llen = 0;
 	running = True;
 
@@ -97,42 +132,77 @@ readpw(Display *dpy, const char *pws)
 	while(running && !XNextEvent(dpy, &ev)) {
 		if(ev.type == KeyPress) {
 			buf[0] = 0;
-			num = XLookupString(&ev.xkey, buf, sizeof buf, &ksym, 0);
-			if(IsKeypadKey(ksym)) {
-				if(ksym == XK_KP_Enter)
-					ksym = XK_Return;
-				else if(ksym >= XK_KP_0 && ksym <= XK_KP_9)
-					ksym = (ksym - XK_KP_0) + XK_0;
-			}
-			if(IsFunctionKey(ksym) || IsKeypadKey(ksym)
-					|| IsMiscFunctionKey(ksym) || IsPFKey(ksym)
-					|| IsPrivateKeypadKey(ksym))
+			num = Xutf8LookupString(ic, &ev.xkey, buf, sizeof buf, &ksym, &status);
+			switch (status) {
+			case XBufferOverflow:
+				die("slock: XBufferOverflow");
+			case XLookupNone:
 				continue;
-			switch(ksym) {
-			case XK_Return:
-				passwd[len] = 0;
-#ifdef HAVE_BSD_AUTH
-				running = !auth_userokay(getlogin(), NULL, "auth-xlock", passwd);
-#else
-				running = strcmp(crypt(passwd, pws), pws);
-#endif
-				if(running != False)
-					XBell(dpy, 100);
-				len = 0;
-				break;
-			case XK_Escape:
-				len = 0;
-				break;
-			case XK_BackSpace:
-				if(len)
-					--len;
-				break;
-			default:
-				if(num && !iscntrl((int) buf[0]) && (len + num < sizeof passwd)) { 
+			case XLookupChars:
+				/* Add the chars to the supposed password */
+				if (num) {
 					memcpy(passwd + len, buf, num);
 					len += num;
+					if(running != False)
+						XBell(dpy, 100);
 				}
 				break;
+			case XLookupBoth:
+				switch(ksym) {
+				case XK_KP_Enter:
+				case XK_Return:
+					passwd[len] = 0;
+#ifdef HAVE_BSD_AUTH
+					running = !auth_userokay(getlogin(), NULL, "auth-xlock", passwd);
+#else
+					running = strcmp(crypt(passwd, pws), pws);
+#endif
+					if(running != False)
+						XBell(dpy, 100);
+					len = 0;
+					break;
+				case XK_Escape:
+					len = 0;
+					break;
+				case XK_BackSpace:
+					if(len)
+						--len;
+					break;
+				default:
+					if (num) {
+						memcpy(passwd + len, buf, num);
+						len += num;
+						if(running != False)
+							XBell(dpy, 100);
+					}
+					break;
+				}
+				break;
+			case XLookupKeySym:
+				/* Check if ksym is return, enter, escape or backspace */
+				switch(ksym) {
+				case XK_KP_Enter:
+				case XK_Return:
+					passwd[len] = 0;
+#ifdef HAVE_BSD_AUTH
+					running = !auth_userokay(getlogin(), NULL, "auth-xlock", passwd);
+#else
+					running = strcmp(crypt(passwd, pws), pws);
+#endif
+					if(running != False)
+						XBell(dpy, 100);
+					len = 0;
+					break;
+				case XK_Escape:
+					len = 0;
+					break;
+				case XK_BackSpace:
+					if(len)
+						--len;
+					break;
+				default:
+					break;
+				}
 			}
 			if(llen == 0 && len != 0) {
 				for(screen = 0; screen < nscreens; screen++) {
@@ -150,6 +220,8 @@ readpw(Display *dpy, const char *pws)
 		else for(screen = 0; screen < nscreens; screen++)
 			XRaiseWindow(dpy, locks[screen]->win);
 	}
+	if (im != NULL)
+		XCloseIM(im);
 }
 
 static void
